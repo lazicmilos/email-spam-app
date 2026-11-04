@@ -1,23 +1,35 @@
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.naive_bayes import MultinomialNB
-from sklearn.metrics import classification_report, confusion_matrix
+"""Train the spam classifier and save it as a single sklearn Pipeline.
+
+Output: spam_pipeline.pkl (preprocessing + TF-IDF + Multinomial NB).
+"""
 import pickle
-import re 
-import seaborn as sns
+import sys
+
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.model_selection import cross_val_score, train_test_split
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.pipeline import Pipeline
+
+from preprocessing import preprocess_text
+
+MODEL_PATH = 'spam_pipeline.pkl'
+RANDOM_STATE = 42
 
 # --- Data Loading ---
-# Load dataset with specific encoding for SMS spam data
 try:
     df = pd.read_csv('spam.csv', encoding='latin-1')
-    df = df[['v1', 'v2']]
-    df.columns = ['label', 'text']
 except FileNotFoundError:
-    print("Error: 'spam.csv' not found. Please ensure the file is in the directory.")
-    exit()
+    sys.exit("Error: 'spam.csv' not found. Please ensure the file is in the directory.")
+
+df = df[['v1', 'v2']]
+df.columns = ['label', 'text']
+df['label'] = df['label'].map({'ham': 0, 'spam': 1})
+df = df.dropna()
 
 # Custom list of spam phrases to augment the dataset
 additional_spam = [
@@ -62,93 +74,69 @@ additional_spam = [
     "no hidden fees ever", "free consultation available"
 ]
 
-# Create DataFrame for additional spam and merge
-# Fixed: We use 'spam' string here to match original labels before mapping
-additional_df = pd.DataFrame({
-    'text': additional_spam,
-    'label': ['spam'] * len(additional_spam)
-})
-df = pd.concat([df, additional_df], ignore_index=True)
-
-# --- Preprocessing ---
-def preprocess_text(text):
-    """
-    Cleans text by lowering case, removing non-alphanumeric characters 
-    (except currency and basic punctuation), and removing extra spaces.
-    """
-    if not isinstance(text, str):
-        return ""
-    text = text.lower()
-    # Keep letters, numbers, and common spam-related symbols
-    text = re.sub(r'[^a-z0-9\s£$€!?]', ' ', text)
-    # Remove extra whitespace
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
-
-# Apply preprocessing to text data
-df['text'] = df['text'].apply(preprocess_text)
-
-# Map labels: ham -> 0, spam -> 1
-# This must happen AFTER merging to avoid NaN issues
-df['label'] = df['label'].map({'ham': 0, 'spam': 1})
-
-# Drop any rows that might have become empty or NaN after processing
-df.dropna(inplace=True)
-
-print('--- Data Summary ---')
+print('--- Data Summary (real data) ---')
 print(f'Total samples: {len(df)}')
-print(f'Ham count: {df["label"].value_counts()[0]}')
-print(f'Spam count: {df["label"].value_counts()[1]}')
+print(f'Ham count: {(df["label"] == 0).sum()}')
+print(f'Spam count: {(df["label"] == 1).sum()}')
 
-# --- Model Preparation ---
-# Split data using stratification to maintain class balance
+# --- Train/Test Split ---
+# Split the REAL data first. The test set must contain only real messages,
+# otherwise the easy synthetic phrases inflate the test metrics.
 X_train, X_test, y_train, y_test = train_test_split(
-    df['text'], df['label'], 
-    test_size=0.2, 
-    random_state=42, 
-    stratify=df['label']
+    df['text'], df['label'],
+    test_size=0.2,
+    random_state=RANDOM_STATE,
+    stratify=df['label'],
 )
 
-# Vectorize text using TF-IDF   
-vectorizer = TfidfVectorizer(
-    max_features=5000,
-    ngram_range=(1, 3),
-    min_df=1,
-    max_df=0.85,
-    sublinear_tf=True,
-    stop_words='english' # Optional: removes common words like 'the', 'is'
-)
+# Augment the TRAINING set only with the synthetic spam phrases.
+X_train = pd.concat([X_train, pd.Series(additional_spam)], ignore_index=True)
+y_train = pd.concat([y_train, pd.Series([1] * len(additional_spam))], ignore_index=True)
+print(f'Training samples after augmentation: {len(X_train)} (+{len(additional_spam)} synthetic spam)')
+print(f'Test samples (real only): {len(X_test)}')
 
-X_train_vec = vectorizer.fit_transform(X_train)
-X_test_vec = vectorizer.transform(X_test)
+# --- Pipeline ---
+# preprocess_text runs inside the vectorizer, so the saved pipeline applies
+# exactly the same cleaning at inference time. Passing `preprocessor`
+# replaces sklearn's default lowercasing; preprocess_text lowercases itself.
+pipeline = Pipeline([
+    ('tfidf', TfidfVectorizer(
+        preprocessor=preprocess_text,
+        max_features=5000,
+        ngram_range=(1, 3),
+        min_df=1,
+        max_df=0.85,
+        sublinear_tf=True,
+        stop_words='english',
+    )),
+    ('nb', MultinomialNB(alpha=0.1)),
+])
+
+# --- Cross-Validation ---
+# The vectorizer is refit inside each fold, so no vocabulary/IDF information
+# leaks from the validation fold into training.
+cv_scores = cross_val_score(pipeline, X_train, y_train, cv=5, scoring='f1')
+print(f'\nCross-validation F1 scores: {np.round(cv_scores, 4)}')
+print(f'Mean CV F1: {cv_scores.mean():.4f}')
 
 # --- Training and Evaluation ---
-# Use Multinomial Naive Bayes with small alpha for smoothing
-model = MultinomialNB(alpha=0.1)
-model.fit(X_train_vec, y_train)
+pipeline.fit(X_train, y_train)
+y_pred = pipeline.predict(X_test)
 
-# Perform Cross-Validation to check for overfitting
-cv_score = cross_val_score(model, X_train_vec, y_train, cv=5, scoring='f1')
-print(f'\nCross-validation F1 scores: {cv_score}')
-print(f'Mean CV F1: {cv_score.mean():.4f}')
+print("\n" + "=" * 40)
+print("   CLASSIFICATION REPORT (test set)")
+print("=" * 40)
+print(classification_report(y_test, y_pred, target_names=['Ham', 'Spam'], digits=4))
 
-# Final evaluation on the test set
-y_pred = model.predict(X_test_vec)
-
-print("\n" + "="*40)
-print("   CLASSIFICATION REPORT")
-print("="*40)
-print(classification_report(y_test, y_pred, target_names=['Ham', 'Spam']))
-
-# Feature Importance: Identifying top spam-triggering words
+# --- Feature Importance: top spam-indicating n-grams ---
+vectorizer = pipeline.named_steps['tfidf']
+model = pipeline.named_steps['nb']
 feature_names = vectorizer.get_feature_names_out()
-spam_log_probs = model.feature_log_prob_[1]
-ham_log_probs = model.feature_log_prob_[0]
-spam_indicators = spam_log_probs - ham_log_probs
+spam_indicators = model.feature_log_prob_[1] - model.feature_log_prob_[0]
 
-print("\n" + "="*40)
+print("\n" + "=" * 40)
 print("   TOP 15 SPAM INDICATORS")
-print("="*40)
+print("=" * 40)
 top_spam_indices = spam_indicators.argsort()[-15:][::-1]
 for i, idx in enumerate(top_spam_indices, 1):
     print(f"{i:2d}. {feature_names[idx]:20s} (Score: {spam_indicators[idx]:+.2f})")
@@ -162,37 +150,28 @@ test_samples = [
     "100% FREE! Call 555-1234 NOW!!!",
 ]
 
-print("\n" + "="*40)
+print("\n" + "=" * 40)
 print("   LIVE PREDICTION TEST")
-print("="*40)
-for text in test_samples:
-    proc = preprocess_text(text)
-    vec = vectorizer.transform([proc])
-    prob = model.predict_proba(vec)[0, 1]
+print("=" * 40)
+for text, prob in zip(test_samples, pipeline.predict_proba(test_samples)[:, 1]):
     label = 'Spam' if prob > 0.5 else 'Ham'
-    print(f"[{label}] ({prob*100:5.2f}%) -> {text}")
+    print(f"[{label}] ({prob * 100:5.2f}%) -> {text}")
 
-# --- Saving the Artifacts ---
-with open('model.pkl', 'wb') as f:
-    pickle.dump(model, f)
-with open('vectorizer.pkl', 'wb') as f:
-    pickle.dump(vectorizer, f)
+# --- Saving ---
+with open(MODEL_PATH, 'wb') as f:
+    pickle.dump(pipeline, f)
+print(f"\nPipeline saved to {MODEL_PATH}.")
 
-print("\nModel and Vectorizer saved successfully.")
-
-# Visualizing Confusion Matrix in procentages
+# --- Confusion Matrix ---
 cm = confusion_matrix(y_test, y_pred)
 labels = np.array([
-    [f"Correct Ham\n{cm[0,0]}", f"WRONGLY BLOCKED\n{cm[0,1]}"],
-    [f"Missed Spam\n{cm[1,0]}", f"Correct Spam\n{cm[1,1]}"]
+    [f"Correct Ham\n{cm[0, 0]}", f"WRONGLY BLOCKED\n{cm[0, 1]}"],
+    [f"Missed Spam\n{cm[1, 0]}", f"Correct Spam\n{cm[1, 1]}"],
 ])
 
 plt.figure(figsize=(7, 5))
 sns.heatmap(cm, annot=labels, fmt="", cmap='RdYlGn', cbar=False)
-
-plt.title('Spam Filter Performance - Detailed View')
+plt.title('Spam Filter Performance (test set)')
 plt.xlabel('What the Model Decided')
-plt.ylabel('What the Email Actually Was')
+plt.ylabel('What the Message Actually Was')
 plt.show()
-
-#End of file 

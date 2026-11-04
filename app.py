@@ -1,41 +1,33 @@
-from flask import Flask, jsonify, render_template, request
-import pickle
 import os
-import re  # Added for preprocessing
+import pickle
+
+from flask import Flask, jsonify, render_template, request
+
+# The pickled pipeline references preprocessing.preprocess_text, so this
+# module must be importable when the pipeline is loaded.
+import preprocessing  # noqa: F401
+
+MODEL_PATH = 'spam_pipeline.pkl'
+SPAM_THRESHOLD = 0.5
 
 app = Flask(__name__)
 
-# --- PREPROCESSING FUNCTION (Must match training script) ---
-def preprocess_text(text):
-    """
-    Apply the same cleaning steps used during model training.
-    """
-    if not isinstance(text, str):
-        return ""
-    # Lowercase, keep letters, numbers and special spam triggers like £$€!?
-    text = text.lower()
-    text = re.sub(r'[^a-z0-9\s£$€!?]', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
 
-# Load the NEW pre-trained model with error handling
-try:
-    if not os.path.exists('model.pkl'):
-        raise FileNotFoundError("model.pkl not found")
-    if not os.path.exists('vectorizer.pkl'):
-        raise FileNotFoundError("vectorizer.pkl not found")
-    
-    # Open with context manager (best practice)
-    with open('model.pkl', 'rb') as f:
-        model = pickle.load(f)
-    with open('vectorizer.pkl', 'rb') as f:
-        vectorizer = pickle.load(f)
-        
-    print("✓ Improved Model and vectorizer loaded successfully")
-except Exception as e:
-    print(f"✗ Error loading model: {e}")
-    model = None
-    vectorizer = None
+def load_pipeline(path):
+    if not os.path.exists(path):
+        print(f"✗ {path} not found. Run `python train_model_improve.py` first.")
+        return None
+    try:
+        with open(path, 'rb') as f:
+            pipeline = pickle.load(f)
+    except Exception as e:
+        print(f"✗ Error loading {path}: {e}")
+        return None
+    print(f"✓ Loaded {path}")
+    return pipeline
+
+
+pipeline = load_pipeline(MODEL_PATH)
 
 
 @app.route('/')
@@ -45,48 +37,31 @@ def home():
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    if model is None or vectorizer is None:
+    if pipeline is None:
         return jsonify({'error': 'Model not loaded. Check server logs.'}), 500
-    
+
+    data = request.get_json(silent=True)
+    if not data or not isinstance(data.get('text'), str):
+        return jsonify({'error': 'Request body must be JSON with a "text" string'}), 400
+
+    text = data['text']
+    if not text.strip():
+        return jsonify({'error': 'Text cannot be empty'}), 400
+
     try:
-        data = request.get_json()
-        if not data or 'text' not in data:
-            return jsonify({'error': 'Invalid request data'}), 400
-        
-        raw_text = data['text']
-        
-        if not raw_text or not raw_text.strip():
-            return jsonify({'error': 'Text cannot be empty'}), 400
-        
-        # 1. APPLY PREPROCESSING (Crucial step for the improved model)
-        processed_text = preprocess_text(raw_text)
-        
-        # 2. VECTORIZE (Using the loaded improved vectorizer)
-        text_vec = vectorizer.transform([processed_text])
-        
-        # 3. PREDICT PROBABILITY
-        # We want the probability of being SPAM (class 1)
-        # model.predict_proba returns [[prob_ham, prob_spam]]
-        proba_spam = model.predict_proba(text_vec)[0, 1]
-        
-        # 4. DECIDE RESULT
-        # You can adjust the threshold here (e.g., 0.5)
-        prediction = 1 if proba_spam > 0.5 else 0
-        
-        result = 'Spam' if prediction == 1 else 'Not Spam'
-        confidence = f"{proba_spam*100:.2f}%"
-        
-        print(f"Input: {raw_text[:30]}... -> Prediction: {result} ({confidence})")
-        
-        return jsonify({
-            'result': result, 
-            'confidence': confidence,
-            'is_spam': bool(prediction)
-        })
-    
+        # The pipeline preprocesses, vectorizes and classifies in one step.
+        # predict_proba returns [[P(ham), P(spam)]].
+        spam_probability = float(pipeline.predict_proba([text])[0, 1])
     except Exception as e:
         print(f"ERROR in /predict: {e}")
         return jsonify({'error': 'Internal server error processing text'}), 500
+
+    is_spam = spam_probability > SPAM_THRESHOLD
+    return jsonify({
+        'result': 'Spam' if is_spam else 'Not Spam',
+        'is_spam': is_spam,
+        'spam_probability': round(spam_probability, 4),
+    })
 
 
 if __name__ == '__main__':
