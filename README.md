@@ -24,18 +24,19 @@ A Flask web app that classifies a message as **Spam** or **Not Spam** and return
 1. **Preprocessing:** text is lowercased, and everything except letters, digits, whitespace and `£ $ € ! ?` is stripped. Currency signs and exclamation marks are kept on purpose because they are strong spam signals.
 2. **Vectorization:** `TfidfVectorizer` with up to 5000 features, n-grams 1–3, sublinear TF, English stop words removed, and `max_df=0.85`.
 3. **Model:** `MultinomialNB(alpha=0.1)`.
-4. **Decision:** a message is labeled spam when `P(spam) > 0.5`. The threshold is set in `app.py`.
+4. **Decision:** a message is labeled spam when `P(spam) > 0.5`. The threshold is `SPAM_THRESHOLD` in `app.py`.
 
-The same `preprocess_text` function is used in `train_model_improve.py` and `app.py`. If you change it in one file, change it in the other too, or the app will see different input than the model was trained on.
+Steps 1–3 are saved together as a single scikit-learn `Pipeline` (`spam_pipeline.pkl`). Preprocessing lives in one place, `preprocessing.py`, and is passed to the vectorizer as its `preprocessor`. Training and inference therefore always clean text the same way, and the app just calls `pipeline.predict_proba([text])`.
 
 ## Project Structure
 
 ```
 ├── app.py                  # Flask app: serves the UI and the /predict endpoint
-├── train_model_improve.py  # Main training script (TF-IDF + NB); saves model.pkl and vectorizer.pkl
+├── preprocessing.py        # Shared text cleaning used by training and inference
+├── train_model_improve.py  # Main training script; saves spam_pipeline.pkl
 ├── email_spam.py           # Baseline model (CountVectorizer + NB), kept for comparison
 ├── check.py                # Dataset inspection: class balance and sample messages
-├── test.py                 # Checks that model.pkl and vectorizer.pkl load correctly
+├── test.py                 # Smoke test: loads spam_pipeline.pkl and runs one prediction
 ├── templates/
 │   └── index.html          # Frontend
 └── requirements.txt
@@ -68,7 +69,7 @@ The dataset is not committed to the repo. Download the [SMS Spam Collection Data
 python train_model_improve.py
 ```
 
-This prints the evaluation metrics and writes `model.pkl` and `vectorizer.pkl`.
+This prints the evaluation metrics and writes `spam_pipeline.pkl`.
 
 **5. Run the app**
 
@@ -91,16 +92,16 @@ Request:
 Response:
 
 ```json
-{ "result": "Spam", "confidence": "98.73%", "is_spam": true }
+{ "result": "Spam", "is_spam": true, "spam_probability": 0.9873 }
 ```
 
-`confidence` is the model's probability that the message is spam, not its confidence in whatever label it picked. The value above is only an example.
+`spam_probability` is a number between 0 and 1: the model's probability that the message is spam, whatever label it picked. The value above is only an example.
 
-Errors: `400` if the body is missing or the text is empty, and `500` if the model files are not loaded.
+Errors: `400` if the body is not JSON with a non-empty `text` string, and `500` if the model is not loaded.
 
 ## Evaluation
 
-The dataset is imbalanced: about 87% of the messages are ham. A model that always answers "ham" already gets about 87% accuracy, so accuracy alone says little. The metrics that matter are **precision and recall on the spam class**, measured on a held-out test set (stratified 80/20 split, `random_state=42`).
+The dataset is imbalanced: about 87% of the messages are ham. A model that always answers "ham" already gets about 87% accuracy, so accuracy alone says little. The metrics that matter are **precision and recall on the spam class**, measured on a held-out test set of real messages only (stratified 80/20 split, `random_state=42`). Cross-validation runs on the full pipeline, so the vectorizer is refit inside each fold.
 
 <!-- Fill in with the output of `python train_model_improve.py` -->
 
@@ -117,7 +118,7 @@ The dataset is imbalanced: about 87% of the messages are ham. A model that alway
 ## Limitations
 
 - **Domain mismatch:** the model is trained on SMS messages, not email. Email-specific signals such as headers, HTML, links and sender reputation are not used.
-- **Synthetic data:** about 80 hand-written spam phrases are added to the training data. They are added before the train/test split, so some of them end up in the test set. That makes test metrics slightly optimistic for this kind of phrase.
+- **Synthetic data:** about 80 hand-written spam phrases are added to the training set only, after the split, so the test set has no synthetic phrases. They do appear in the cross-validation folds, so the CV F1 is slightly optimistic. The test-set numbers are the ones to report.
 - **Fixed threshold:** the 0.5 threshold was not tuned. In production you would choose it based on how costly a wrongly blocked real message is.
 
 ## Dataset

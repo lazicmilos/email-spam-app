@@ -441,17 +441,17 @@
 
         function displayResult(data) {
             const isSpam = data.result === 'Spam';
-            const confidence = parseFloat(data.confidence);
+            const spamPercent = (data.spam_probability * 100).toFixed(2);
 
             resultDiv.className = isSpam ? 'spam' : 'not-spam';
             resultDiv.innerHTML = `
                 <strong>${isSpam ? '🚨 Spam Detected' : '✅ Legitimate Email'}</strong>
                 <div class="confidence">
-                    <span>Confidence:</span>
+                    <span>Spam probability:</span>
                     <div class="confidence-bar">
-                        <div class="confidence-fill" style="width: ${confidence}%"></div>
+                        <div class="confidence-fill" style="width: ${spamPercent}%"></div>
                     </div>
-                    <span>${data.confidence}</span>
+                    <span>${spamPercent}%</span>
                 </div>
             `;
 

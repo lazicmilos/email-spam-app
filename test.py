@@ -1,21 +1,17 @@
+"""Smoke test: check that the trained pipeline loads and makes a prediction."""
 import pickle
-import os
+import sys
 
-print("Current directory:", os.getcwd())
-print("\nFiles in directory:")
-for f in os.listdir('.'):
-    print(f"  - {f}")
+import preprocessing  # noqa: F401  (needed to unpickle the pipeline)
 
-print("\n--- Testing Model ---")
+MODEL_PATH = 'spam_pipeline.pkl'
+
 try:
-    model = pickle.load(open('model.pkl', 'rb'))
-    print("SUCCESS: Model loaded -", type(model))
+    with open(MODEL_PATH, 'rb') as f:
+        pipeline = pickle.load(f)
 except Exception as e:
-    print("ERROR loading model:", e)
+    sys.exit(f"ERROR loading {MODEL_PATH}: {e}")
 
-print("\n--- Testing Vectorizer ---")
-try:
-    vectorizer = pickle.load(open('vectorizer.pkl', 'rb'))
-    print("SUCCESS: Vectorizer loaded -", type(vectorizer))
-except Exception as e:
-    print("ERROR loading vectorizer:", e)
+print("SUCCESS: Pipeline loaded -", type(pipeline))
+proba = pipeline.predict_proba(["WINNER! Claim your £1000 prize now!"])[0, 1]
+print(f"Sample spam probability: {proba:.4f}")
